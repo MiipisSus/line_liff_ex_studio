@@ -1,0 +1,18 @@
+<button type="button" class="btn btn-link px-0 mb-2"
+        hx-get="{% url 'liff-book-slots' %}"
+        hx-vals='{"service": "{{ service.pk }}", "staff": "{{ staff.pk|default:"" }}", "date": "{{ start_at|date:"Y-m-d" }}"}'>‹ 重新選擇時段</button>
+<h1 class="h5 mb-3">確認預約內容</h1>
+
+<ul class="list-group mb-3">
+  <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">服務</span><span>{{ service.name }}</span></li>
+  <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">人員</span><span>{{ staff.name|default:"不指定（由店家安排）" }}</span></li>
+  <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">時間</span><span>{{ start_at|date:"Y/n/j" }} {{ start_at|time:"H:i" }}（{{ service.duration_minutes }} 分鐘）</span></li>
+  <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">價格</span><span>NT$ {{ service.price }}</span></li>
+</ul>
+
+<form hx-post="{% url 'liff-book-create' %}" hx-disabled-elt="find button">
+  <input type="hidden" name="service" value="{{ service.pk }}">
+  <input type="hidden" name="staff" value="{{ staff.pk|default:"" }}">
+  <input type="hidden" name="start_at" value="{{ start_at|date:"c" }}">
+  <button type="submit" class="btn btn-primary w-100">確認預約</button>
+</form>

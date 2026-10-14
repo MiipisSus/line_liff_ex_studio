@@ -1,0 +1,4 @@
+<div class="alert alert-danger">{{ message }}</div>
+{% if request.customer %}
+  <button type="button" class="btn btn-outline-primary w-100" hx-get="{% url 'liff-book-services' %}">回到服務列表</button>
+{% endif %}

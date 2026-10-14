@@ -32,6 +32,10 @@ LINE 預約系統（LIFF / LINE MINI App + Messaging API + Django 後台）。
 - 測試：`pytest`（設定在 `pytest.ini`）。外部 HTTP 呼叫（LINE API）一律用 `responses` mock。
 - 示範資料：`python manage.py seed_demo`（已有人員時略過）。
 - 後台的 `Booking` 目前唯讀；建立預約與狀態轉換必須經過 service layer。
+- LIFF 預約流程在 `liff/views.py`（`/liff/book/...`），每一步回傳 `liff/templates/liff/partials/` 的 HTMX partial，畫面替換到 `#app`：
+  - 頁面間的參數一律用 `hx-vals` 傳遞，不要手拼 query string（ISO 時間的 `+08:00` 會被當成空白）。
+  - `htmx.config.responseHandling` 已設定 4xx 也替換畫面，錯誤訊息 partial 可以搭配正確的狀態碼（400 / 401 / 403 / 409）。
+  - 需要登入的 partial view 用 `@customer_required`，會把顧客放進 `request.customer`。
 - 用 ngrok / cloudflared 在手機測試時，`.env` 要設 `DJANGO_BEHIND_PROXY=True`，否則 Django 會把 HTTPS 當成 HTTP，CSRF Origin 檢查失敗（403）。
 - **改了 `.env` 必須手動重啟 `runserver`**：autoreload 不會重新讀 `.env`。
 - 設定一律透過 `config/settings.py` 的 `env()` / `env_bool()` 讀取；必要變數未設定時啟動即報錯。
@@ -97,12 +101,14 @@ Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 40
 ## 里程碑
 
 1. ✅ **身分打通**：在 LINE 中打開 LIFF，畫面顯示「你好，{名稱}」，後端資料庫建立 Customer。（已透過 ngrok 在手機上實測通過；尚未部署到 VPS）
-2. **時段模型**：後台可以設定營業時間、服務、人員、例外日，API 能回傳某日可預約的時段。
-3. **建立預約**：LIFF 完成選服務、選時段、確認、送出；併發測試通過。
+2. ✅ **時段模型**：後台可以設定營業時間、服務、人員、例外日，API 能回傳某日可預約的時段。
+3. **建立預約**：LIFF 完成選服務、選時段、確認、送出；併發測試通過。（已實作並通過測試，待手機實測）
    - 前端只送 `service`、`start_at`、（選填）`staff`；`end_at` 與價格由後端決定。
    - 建立時在交易內重新呼叫 `get_available_slots()` 驗證，並加上 exclusion constraint（同一人員、`BLOCKING_STATUSES` 時間不可重疊）。
    - `Booking` 加 `price` 快照，建立時從 `Service` 複製，之後不隨服務設定變動。
    - 店家插單的 service 函式可帶 `allow_outside_schedule`，略過班表檢查，但仍受重疊約束。
+   - 實作：`booking/services.py` 的 `create_booking()`（顧客，檢查 no-show 上限）與 `create_booking_for_shop()`（店家，不檢查 no-show）。併發控制 = 依 pk 順序 `select_for_update()` 鎖住候選人員 → 重新計算時段 → 寫入；exclusion constraint `booking_no_overlap_per_staff` 為最後防線。「不指定人員」分給有空人員中排序最前面的一位。店家插單的後台介面留到里程碑 6。
+   - 併發測試在 `booking/tests/test_concurrency.py`（`transaction=True` + 多執行緒）。拿掉鎖時「不指定人員」測試會失敗，修改這段邏輯後務必重跑。
 4. **Bot 通知**：預約成功時用 reply 通知；店家改變狀態時用 push 通知。Rich Menu 提供「我要預約」和「我的預約」。
    - 店家在已有預約的日期新增休假或修改班表時，後台要列出受影響的預約並提示。
 5. **排程**：前一天提醒；逾時未確認的預約自動取消。
@@ -121,5 +127,6 @@ Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 40
 ## 部署注意事項
 
 - 正式環境：`DJANGO_DEBUG=False`，`DJANGO_ALLOWED_HOSTS` 填實際網域（不可用 `*`），`DJANGO_SECRET_KEY` 另外產生。
+- migration 會建立 PostgreSQL extension `btree_gist`，資料庫使用者需要有建立 extension 的權限（Docker 官方 postgres image 的預設使用者可以）。
 - Nginx 必須設定 `proxy_set_header X-Forwarded-Proto $scheme;`，並搭配 `DJANGO_BEHIND_PROXY=True`；未經代理直接對外時不可開啟此設定（header 可被偽造）。
 - 回答與註解使用繁體中文；程式識別字使用英文。

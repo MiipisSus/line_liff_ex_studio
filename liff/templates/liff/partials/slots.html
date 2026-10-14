@@ -1,0 +1,30 @@
+<button type="button" class="btn btn-link px-0 mb-2" hx-get="{% url 'liff-book-staff' service.pk %}">‹ 重新選擇人員</button>
+<h1 class="h5 mb-1">{{ service.name }}</h1>
+<p class="text-secondary mb-3">{{ staff.name|default:"不指定人員" }}・{{ service.duration_minutes }} 分鐘</p>
+
+<div class="day-strip d-flex gap-2 pb-2 mb-3">
+  {% for day, weekday in days %}
+    <button type="button" class="btn btn-sm {% if day == selected %}btn-primary{% else %}btn-outline-primary{% endif %}"
+            aria-pressed="{% if day == selected %}true{% else %}false{% endif %}"
+            hx-get="{% url 'liff-book-slots' %}"
+            hx-vals='{"service": "{{ service.pk }}", "staff": "{{ staff.pk|default:"" }}", "date": "{{ day|date:"Y-m-d" }}"}'>
+      {{ day|date:"n/j" }}<br>（{{ weekday }}）
+    </button>
+  {% endfor %}
+</div>
+
+{% if slots %}
+  <div class="row row-cols-3 g-2">
+    {% for slot in slots %}
+      <div class="col">
+        <button type="button" class="btn btn-outline-secondary w-100"
+                hx-get="{% url 'liff-book-confirm' %}"
+                hx-vals='{"service": "{{ service.pk }}", "staff": "{{ staff.pk|default:"" }}", "start_at": "{{ slot.start_at|date:"c" }}"}'>
+          {{ slot.start_at|time:"H:i" }}
+        </button>
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="text-secondary">這天沒有可預約的時段，請選擇其他日期。</p>
+{% endif %}

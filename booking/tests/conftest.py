@@ -60,6 +60,7 @@ def customer(db):
 def make_booking(customer, haircut):
     def _make(staff, start, end, status=Booking.Status.CONFIRMED):
         return Booking.objects.create(
-            customer=customer, service=haircut, staff=staff, start_at=start, end_at=end, status=status
+            customer=customer, service=haircut, staff=staff, start_at=start, end_at=end, status=status,
+            price=haircut.price,
         )
     return _make

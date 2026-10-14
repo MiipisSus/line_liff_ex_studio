@@ -7,6 +7,7 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -141,3 +142,92 @@ def get_available_slots(service: Service, day: date, staff: Staff | None = None,
                 start += step
 
     return [Slot(start_at=s, end_at=s + duration, staff_ids=slots[s]) for s in sorted(slots)]
+
+
+# --- 建立預約 ---------------------------------------------------------------------
+
+
+class BookingError(Exception):
+    """建立預約失敗的基底類別；message 可直接顯示給使用者。"""
+
+
+class SlotUnavailable(BookingError):
+    """時段不可預約（不在班表內、已被預約、太近或太遠）。對應 409。"""
+
+
+class BookingNotAllowed(BookingError):
+    """顧客目前不能預約（例如 no-show 達上限）。對應 403。"""
+
+
+def check_customer_can_book(customer, shop):
+    if shop.no_show_limit and customer.bookings.filter(status=Booking.Status.NO_SHOW).count() >= shop.no_show_limit:
+        raise BookingNotAllowed("未到次數已達上限，暫時無法線上預約，請直接聯繫店家")
+
+
+def _insert_booking(customer, service, staff_id, start_at):
+    try:
+        # savepoint：讓 IntegrityError 不會讓外層交易整個失效
+        with transaction.atomic():
+            return Booking.objects.create(
+                customer=customer,
+                service=service,
+                staff_id=staff_id,
+                start_at=start_at,
+                end_at=start_at + timedelta(minutes=service.duration_minutes),
+                price=service.price,
+            )
+    except IntegrityError as exc:
+        # exclusion constraint 擋下重疊；正常情況下前面的鎖已避免走到這裡
+        raise SlotUnavailable("這個時段剛剛被預約了，請選擇其他時段") from exc
+
+
+def create_booking(customer, service, start_at, staff=None, now=None):
+    """顧客線上建立預約（狀態 pending）。會檢查 no-show 上限。"""
+    check_customer_can_book(customer, Shop.load())
+    return _create_within_schedule(customer, service, start_at, staff, now)
+
+
+def create_booking_for_shop(customer, service, staff, start_at, allow_outside_schedule=False):
+    """店家代客建立預約（插單），不檢查顧客的 no-show 上限。
+
+    allow_outside_schedule=True 時再略過班表與提前 / 最遠預約天數，
+    但仍受 exclusion constraint 約束，不能與既有預約重疊。
+    """
+    if not allow_outside_schedule:
+        return _create_within_schedule(customer, service, start_at, staff, now=None)
+    if not service.staff.filter(pk=staff.pk).exists():
+        raise SlotUnavailable(f"{staff} 不能執行「{service}」")
+    with transaction.atomic():
+        return _insert_booking(customer, service, staff.pk, start_at)
+
+
+def _create_within_schedule(customer, service, start_at, staff, now):
+    """在可預約時段內建立預約。
+
+    併發控制分兩層：
+    1. 鎖住所有候選人員的資料列，同一人員的建立請求依序執行；拿到鎖後才重新計算時段，
+       因此一定看得到前一個交易剛建立的預約。「不指定人員」時這也避免兩個請求都分到
+       同一人而其中一個失敗（另一位人員明明有空）。
+    2. 資料庫的 exclusion constraint 保證同一人員的佔用時間不重疊，即使繞過本函式也一樣。
+    """
+    with transaction.atomic():
+        # 依 pk 排序加鎖，避免不同請求以不同順序加鎖造成死結
+        staff_ids = list(
+            Staff.objects.select_for_update()
+            .filter(pk__in=get_bookable_staff(service, staff))
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
+        if not staff_ids:
+            raise SlotUnavailable("此服務目前沒有可預約的人員")
+
+        day = start_at.astimezone(SHOP_TZ).date()
+        slot = next(
+            (s for s in get_available_slots(service, day, staff=staff, now=now) if s.start_at == start_at),
+            None,
+        )
+        if slot is None:
+            raise SlotUnavailable("這個時段已無法預約，請選擇其他時段")
+
+        # 不指定人員時，分給有空的人員中排序最前面的一位
+        return _insert_booking(customer, service, slot.staff_ids[0], start_at)

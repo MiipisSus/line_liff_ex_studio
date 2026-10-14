@@ -1,0 +1,17 @@
+<button type="button" class="btn btn-link px-0 mb-2" hx-get="{% url 'liff-book-services' %}">‹ 重新選擇服務</button>
+<h1 class="h5 mb-1">{{ service.name }}</h1>
+<p class="text-secondary mb-3">請選擇服務人員</p>
+
+<div class="list-group">
+  <button type="button" class="list-group-item list-group-item-action"
+          hx-get="{% url 'liff-book-slots' %}" hx-vals='{"service": "{{ service.pk }}"}'>
+    <span class="fw-semibold">不指定</span><br>
+    <small class="text-secondary">由有空的人員為您服務</small>
+  </button>
+  {% for staff in staff_list %}
+    <button type="button" class="list-group-item list-group-item-action"
+            hx-get="{% url 'liff-book-slots' %}" hx-vals='{"service": "{{ service.pk }}", "staff": "{{ staff.pk }}"}'>
+      {{ staff.name }}
+    </button>
+  {% endfor %}
+</div>

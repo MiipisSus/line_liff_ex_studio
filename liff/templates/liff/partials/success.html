@@ -1,0 +1,11 @@
+<div class="alert alert-success">預約已送出，店家確認後會再通知您。</div>
+
+<ul class="list-group mb-3">
+  <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">服務</span><span>{{ booking.service.name }}</span></li>
+  <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">人員</span><span>{{ booking.staff.name }}</span></li>
+  <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">時間</span><span>{{ booking.start_at|date:"Y/n/j" }} {{ booking.start_at|time:"H:i" }}–{{ booking.end_at|time:"H:i" }}</span></li>
+  <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">價格</span><span>NT$ {{ booking.price }}</span></li>
+  <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">狀態</span><span>{{ booking.get_status_display }}</span></li>
+</ul>
+
+<button type="button" class="btn btn-outline-primary w-100" hx-get="{% url 'liff-book-services' %}">再預約一筆</button>

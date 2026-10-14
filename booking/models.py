@@ -1,8 +1,10 @@
 from zoneinfo import ZoneInfo
 
+from django.contrib.postgres.constraints import ExclusionConstraint
+from django.contrib.postgres.fields import DateTimeRangeField, RangeBoundary, RangeOperators
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Func, Q
 
 # 店家營業時區固定為台北；資料庫一律存 UTC，只在計算本地日期 / 顯示時使用
 SHOP_TZ = ZoneInfo("Asia/Taipei")
@@ -175,16 +177,26 @@ class ScheduleException(models.Model):
                 raise ValidationError("特別上班必須填寫時間")
 
 
-class Booking(models.Model):
-    class Status(models.TextChoices):
-        PENDING = "pending", "待確認"
-        CONFIRMED = "confirmed", "已確認"
-        COMPLETED = "completed", "已完成"
-        CANCELLED = "cancelled", "已取消"
-        NO_SHOW = "no_show", "未到"
+class TsTzRange(Func):
+    function = "TSTZRANGE"
+    output_field = DateTimeRangeField()
 
-    # 會佔用時段的狀態
-    BLOCKING_STATUSES = (Status.PENDING, Status.CONFIRMED)
+
+class BookingStatus(models.TextChoices):
+    PENDING = "pending", "待確認"
+    CONFIRMED = "confirmed", "已確認"
+    COMPLETED = "completed", "已完成"
+    CANCELLED = "cancelled", "已取消"
+    NO_SHOW = "no_show", "未到"
+
+
+# 會佔用時段的狀態（時段計算與 exclusion constraint 共用）
+BLOCKING_STATUSES = (BookingStatus.PENDING, BookingStatus.CONFIRMED)
+
+
+class Booking(models.Model):
+    Status = BookingStatus
+    BLOCKING_STATUSES = BLOCKING_STATUSES
 
     customer = models.ForeignKey(
         "liff.Customer", verbose_name="顧客", on_delete=models.PROTECT, related_name="bookings"
@@ -193,8 +205,10 @@ class Booking(models.Model):
     staff = models.ForeignKey(Staff, verbose_name="人員", on_delete=models.PROTECT, related_name="bookings")
     start_at = models.DateTimeField("開始時間")
     end_at = models.DateTimeField("結束時間")
+    # 建立時從 Service 複製的價格快照，之後不隨服務設定變動
+    price = models.PositiveIntegerField("價格（元）")
     # 狀態轉換一律透過 service layer，不要直接改這個欄位
-    status = models.CharField("狀態", max_length=20, choices=Status.choices, default=Status.PENDING)
+    status = models.CharField("狀態", max_length=20, choices=BookingStatus.choices, default=BookingStatus.PENDING)
     created_at = models.DateTimeField("建立時間", auto_now_add=True)
     updated_at = models.DateTimeField("更新時間", auto_now=True)
 
@@ -205,6 +219,15 @@ class Booking(models.Model):
         indexes = [models.Index(fields=["staff", "start_at"])]
         constraints = [
             models.CheckConstraint(condition=Q(start_at__lt=models.F("end_at")), name="booking_start_before_end"),
+            # 最後一道防線：同一人員佔用中的預約時間不可重疊（區間為 [start, end)，相接不算重疊）
+            ExclusionConstraint(
+                name="booking_no_overlap_per_staff",
+                expressions=[
+                    (F("staff"), RangeOperators.EQUAL),
+                    (TsTzRange("start_at", "end_at", RangeBoundary()), RangeOperators.OVERLAPS),
+                ],
+                condition=Q(status__in=BLOCKING_STATUSES),
+            ),
         ]
 
     def __str__(self):

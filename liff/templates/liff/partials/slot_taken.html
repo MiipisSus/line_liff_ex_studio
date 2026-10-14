@@ -1,0 +1,4 @@
+<div class="alert alert-warning">{{ message }}</div>
+<button type="button" class="btn btn-primary w-100"
+        hx-get="{% url 'liff-book-slots' %}"
+        hx-vals='{"service": "{{ service.pk }}", "staff": "{{ staff.pk|default:"" }}", "date": "{{ date|date:"Y-m-d" }}"}'>重新選擇時段</button>
