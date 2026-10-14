@@ -30,6 +30,8 @@ LINE 預約系統（LIFF / LINE MINI App + Messaging API + Django 後台）。
 - 依賴：`pip install -r requirements-dev.txt`（正式環境只裝 `requirements.txt`）。
 - 資料庫：本機使用 Postgres.app（`localhost:5432`，資料庫 `line_liff`）；`docker-compose.yml` 目前只有 `db` 服務，尚未實測。測試也跑在 PostgreSQL 上，不使用 SQLite。
 - 測試：`pytest`（設定在 `pytest.ini`）。外部 HTTP 呼叫（LINE API）一律用 `responses` mock。
+- 示範資料：`python manage.py seed_demo`（已有人員時略過）。
+- 後台的 `Booking` 目前唯讀；建立預約與狀態轉換必須經過 service layer。
 - 用 ngrok / cloudflared 在手機測試時，`.env` 要設 `DJANGO_BEHIND_PROXY=True`，否則 Django 會把 HTTPS 當成 HTTP，CSRF Origin 檢查失敗（403）。
 - **改了 `.env` 必須手動重啟 `runserver`**：autoreload 不會重新讀 `.env`。
 - 設定一律透過 `config/settings.py` 的 `env()` / `env_bool()` 讀取；必要變數未設定時啟動即報錯。
@@ -59,15 +61,17 @@ LINE 預約系統（LIFF / LINE MINI App + Messaging API + Django 後台）。
 
 Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 400。
 
-## 核心領域模型（草案）
+## 核心領域模型
 
-- `Shop`：店家、營業時區（固定 `Asia/Taipei`）
-- `Staff`：服務人員或可預約資源
-- `Service`：服務項目、時長、價格、可執行的 Staff
-- `BusinessHours`：每週營業時段
-- `ScheduleException`：公休、臨時休、特別營業
-- `Customer`：`line_user_id`（unique）、顯示名稱、電話
-- `Booking`：Customer、Service、Staff、`start_at`、`end_at`、狀態、`no_show` 標記
+**一個部署只服務一間店**（LINE channel 也是一店一組），其他模型不掛 `Shop` FK。
+
+- `Shop`（`booking`）：單例，一律用 `Shop.load()` 取得。存店家可設定的規則：時段間隔、最少提前預約、最多可預約天數、取消期限 N 小時、no-show 上限。時區固定 `Asia/Taipei`，用程式常數 `SHOP_TZ`，不是欄位。
+- `Staff`（`booking`）：服務人員或可預約資源
+- `Service`（`booking`）：服務項目、時長、價格、可執行的 Staff（M2M）
+- `WorkingHours`（`booking`）：**每位人員各自的**每週班表，同一天可有多段；不支援跨午夜
+- `ScheduleException`（`booking`）：`closed`（休假；`staff` 為空 = 全店，時間為空 = 整天）或 `open`（特別上班，必須指定人員與時間，加在當天班表上）。同時段 `closed` 優先於 `open`
+- `Customer`（`liff`）：`line_user_id`（unique）、顯示名稱、電話
+- `Booking`（`booking`）：Customer、Service、Staff、`start_at`、`end_at`、狀態。no-show 以狀態 `no_show` 表示，不另設欄位。佔用時段的狀態定義在 `Booking.BLOCKING_STATUSES`（`pending`、`confirmed`）
 
 `Booking` 的狀態：`pending` → `confirmed` → `completed`；分支狀態有 `cancelled`、`no_show`。
 狀態轉換集中在 service layer 或狀態機函式處理，不要在 view 裡直接改 `status`。
@@ -75,7 +79,10 @@ Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 40
 ## 預約系統的關鍵規則
 
 - **時間**：資料庫一律存 UTC（`USE_TZ = True`），只在顯示層轉成 `Asia/Taipei`。
-- **可預約時段**：由 `BusinessHours` 減去 `ScheduleException`、再減去既有 `Booking`，依 `Service` 時長動態計算，不預先產生 slot 資料表。
+- **可預約時段**：由 `WorkingHours` ∪ 特別上班、減去休假、再減去既有 `Booking`，依 `Service` 時長動態計算，不預先產生 slot 資料表。實作在 `booking/services.py` 的 `get_available_slots()`：
+  - 開始時間對齊「以當地午夜為基準、間隔為 `slot_interval_minutes`」的格線。
+  - 顧客可「不指定人員」：回傳任一位可執行人員有空的時段，`Slot.staff_ids` 列出所有有空的人員，建立預約時再分配。
+  - API：`GET /api/services/`、`GET /api/availability/?service=&date=[&staff=]`，時間以 `+08:00` 的 ISO 8601 回傳。
 - **防止重複預約**：建立預約時必須放在 `transaction.atomic()` 裡，搭配 `select_for_update()` 或資料庫層級約束（例如 PostgreSQL 的 exclusion constraint）。必須有併發測試覆蓋這段邏輯。
 - **排程任務**：以「定期掃描資料庫 + 冪等」實作（例如以 `reminded_at` 標記已提醒），不在建立預約時排 ETA 任務；任務邏輯放 `services.py`，django-q2 只做薄包裝。
 - **取消規則**：開始前 N 小時內不可取消；no-show 累積達一定次數時限制預約。N 和次數設計成店家可設定。
@@ -92,9 +99,16 @@ Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 40
 1. ✅ **身分打通**：在 LINE 中打開 LIFF，畫面顯示「你好，{名稱}」，後端資料庫建立 Customer。（已透過 ngrok 在手機上實測通過；尚未部署到 VPS）
 2. **時段模型**：後台可以設定營業時間、服務、人員、例外日，API 能回傳某日可預約的時段。
 3. **建立預約**：LIFF 完成選服務、選時段、確認、送出；併發測試通過。
+   - 前端只送 `service`、`start_at`、（選填）`staff`；`end_at` 與價格由後端決定。
+   - 建立時在交易內重新呼叫 `get_available_slots()` 驗證，並加上 exclusion constraint（同一人員、`BLOCKING_STATUSES` 時間不可重疊）。
+   - `Booking` 加 `price` 快照，建立時從 `Service` 複製，之後不隨服務設定變動。
+   - 店家插單的 service 函式可帶 `allow_outside_schedule`，略過班表檢查，但仍受重疊約束。
 4. **Bot 通知**：預約成功時用 reply 通知；店家改變狀態時用 push 通知。Rich Menu 提供「我要預約」和「我的預約」。
+   - 店家在已有預約的日期新增休假或修改班表時，後台要列出受影響的預約並提示。
 5. **排程**：前一天提醒；逾時未確認的預約自動取消。
 6. **後台打磨與文件**：店家操作流程順暢，並撰寫交付用的 README（部署方式、環境變數、操作說明）。
+   - 完成預約時可填「實收金額」`final_price`（預設等於 `price`），不做金流。
+   - 延長 `end_at`（超時）要透過 service 函式，撞到下一筆預約就拒絕。
 
 ## 開發慣例
 
