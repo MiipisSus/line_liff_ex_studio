@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Django
+db.sqlite3
+/staticfiles/
+/media/
+
+# 機密
+.env
+
+# 測試 / 工具
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 編輯器 / 系統
+.vscode/
+.idea/
+.DS_Store
