@@ -31,6 +31,7 @@ LINE 預約系統（LIFF / LINE MINI App + Messaging API + Django 後台）。
 - 資料庫：本機使用 Postgres.app（`localhost:5432`，資料庫 `line_liff`）；`docker-compose.yml` 目前只有 `db` 服務，尚未實測。測試也跑在 PostgreSQL 上，不使用 SQLite。
 - 測試：`pytest`（設定在 `pytest.ini`）。外部 HTTP 呼叫（LINE API）一律用 `responses` mock。共用 fixture 在 `booking/tests/fixtures.py`，由根目錄 `conftest.py` 的 `pytest_plugins` 載入，各 app 直接使用即可，不要再個別 import fixture。
 - 示範資料：`python manage.py seed_demo`（已有人員時略過）。
+- 背景任務 / 排程：另開一個終端機執行 `python manage.py qcluster`；排程用 `python manage.py setup_schedules` 建立（可重複執行）。沒跑 qcluster 時推播與排程會留在資料庫佇列，啟動後才處理。**qcluster 會對本機開發資料庫真的執行自動取消與提醒。**
 - 後台的 `Booking` 目前唯讀；建立預約與狀態轉換必須經過 service layer。
 - LIFF 預約流程在 `liff/views.py`（`/liff/book/...`），每一步回傳 `liff/templates/liff/partials/` 的 HTMX partial，畫面替換到 `#app`：
   - 頁面間的參數一律用 `hx-vals` 傳遞，不要手拼 query string（ISO 時間的 `+08:00` 會被當成空白）。
@@ -114,8 +115,10 @@ Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 40
 | 歡迎訊息 | 加入好友（follow） | reply |
 | 預約已確認 | 店家在後台確認 | push |
 | 預約已被店家取消 | 店家在後台取消 | push |
+| 預約提醒 | 排程：已確認、開始前 `reminder_hours_before` 小時（預設 24） | push |
+| 未確認自動取消 | 排程：開始前 `pending_auto_cancel_hours` 小時（預設 3）仍為 pending | push |
 
-- push 一律在 `transaction.on_commit` 後發送，失敗只記 log，不回滾狀態；`X-Line-Retry-Key` 由「預約 ID + 狀態」產生，重送不會重複推播。完成、未到、顧客自行取消都不推播。
+- push 一律在 `transaction.on_commit` 後以 django-q2 背景任務排入（`line_bot.notifications.enqueue_booking_notification`），不在請求內同步發送。任務失敗丟例外，由 django-q2 重試（`Q_CLUSTER` 的 `retry` / `max_attempts`）；`X-Line-Retry-Key` 由「預約 ID + 通知種類」產生，重試不會重複推播。發送前重新讀取預約，狀態已不符（例如確認後又被取消）就略過；已知非好友也略過。完成、未到、顧客自行取消都不推播。
 - webhook 只回覆上述關鍵字與 postback，其他文字不回，保留給店家在 OA Manager 手動回覆。
 - **好友狀態**：非好友收不到 push。`Customer.is_line_friend`（`None` = 未知）由 webhook follow / unfollow 更新，預約成功時再以 `GET /v2/bot/profile/{userId}`（不計費，404 = 未加好友或已封鎖）確認，見 `line_bot.services.refresh_friendship()`。確認為非好友時，LIFF 成功畫面提醒並提供「加入官方帳號好友」按鈕；查詢失敗時不提醒，也不影響預約。
 
@@ -130,10 +133,14 @@ Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 40
    - 店家插單的 service 函式可帶 `allow_outside_schedule`，略過班表檢查，但仍受重疊約束。
    - 實作：`booking/services.py` 的 `create_booking()`（顧客，檢查 no-show 上限）與 `create_booking_for_shop()`（店家，不檢查 no-show）。併發控制 = 依 pk 順序 `select_for_update()` 鎖住候選人員 → 重新計算時段 → 寫入；exclusion constraint `booking_no_overlap_per_staff` 為最後防線。「不指定人員」分給有空人員中排序最前面的一位。店家插單的後台介面留到里程碑 6。
    - 併發測試在 `booking/tests/test_concurrency.py`（`transaction=True` + 多執行緒）。拿掉鎖時「不指定人員」測試會失敗，修改這段邏輯後務必重跑。
-4. **Bot 通知**：預約成功時用 reply 通知；店家改變狀態時用 push 通知。Rich Menu 提供「我要預約」和「我的預約」。（已實作並通過測試，待 LINE 平台設定與手機實測）
+4. ✅ **Bot 通知**：預約成功時用 reply 通知；店家改變狀態時用 push 通知。Rich Menu 提供「我要預約」和「我的預約」。
    - 店家在已有預約的日期新增休假或修改班表時，後台要列出受影響的預約並提示。
    - 實作：狀態機在 `booking/services.py`（`ALLOWED_TRANSITIONS`，轉換時 `select_for_update` 以資料庫狀態為準）；顧客取消檢查取消期限並記錄 `cancelled_by`。webhook 在 `line_bot/`。後台預約列表以 admin action 操作狀態，店家取消有確認頁；班表 / 例外日存檔後以 `find_bookings_outside_schedule()` 提示受影響預約。
-5. **排程**：前一天提醒；逾時未確認的預約自動取消。
+5. **排程**：前一天提醒；逾時未確認的預約自動取消。（已實作並通過測試，待實測）
+   - 規則（店家可設定）：已確認的預約在開始前 24 小時提醒；開始前 3 小時仍未確認就自動取消（`cancelled_by=system`）並通知。設為 0 代表關閉。
+   - 實作：`booking/services.py` 的 `send_due_reminders()`、`cancel_unconfirmed_bookings()`；`booking/tasks.py` 只是 django-q2 的薄包裝，每 10 分鐘執行。提醒以 `select_for_update(skip_locked=True)` + `reminded_at` 認領，commit 後才排入推播，多個工作同時跑也不會重複（有併發測試）。
+   - 為了不讓顧客剛預約就被自動取消：顧客最早可預約時間 = max(`min_advance_minutes`, 自動取消時數 + 1 小時)（`customer_min_advance_minutes()`）。店家插單直接為 `confirmed`，且不受此限制。
+   - 店家確認時若已在提醒時間範圍內，直接設定 `reminded_at`，確認通知即代替提醒，不連發兩則。
 6. **後台打磨與文件**：店家操作流程順暢，並撰寫交付用的 README（部署方式、環境變數、操作說明）。
    - 完成預約時可填「實收金額」`final_price`（預設等於 `price`），不做金流。
    - 延長 `end_at`（超時）要透過 service 函式，撞到下一筆預約就拒絕。
@@ -149,6 +156,7 @@ Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 40
 ## 部署注意事項
 
 - 正式環境：`DJANGO_DEBUG=False`，`DJANGO_ALLOWED_HOSTS` 填實際網域（不可用 `*`），`DJANGO_SECRET_KEY` 另外產生。
+- 需要額外一個常駐程序跑 `python manage.py qcluster`（Docker Compose 另開一個 service，與 web 共用 image 和 `.env`）；部署後執行一次 `python manage.py setup_schedules`。
 - migration 會建立 PostgreSQL extension `btree_gist`，資料庫使用者需要有建立 extension 的權限（Docker 官方 postgres image 的預設使用者可以）。
 - Nginx 必須設定 `proxy_set_header X-Forwarded-Proto $scheme;`，並搭配 `DJANGO_BEHIND_PROXY=True`；未經代理直接對外時不可開啟此設定（header 可被偽造）。
 - 回答與註解使用繁體中文；程式識別字使用英文。

@@ -25,6 +25,9 @@ def shop(db):
     shop.slot_interval_minutes = 30
     shop.min_advance_minutes = 60
     shop.max_advance_days = 30
+    # 預設關閉排程相關設定，讓既有測試只看各自的規則；排程測試再個別開啟
+    shop.pending_auto_cancel_hours = 0
+    shop.reminder_hours_before = 0
     shop.save()
     return shop
 

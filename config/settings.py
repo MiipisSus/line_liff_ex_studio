@@ -65,6 +65,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.postgres',
+    'django_q',
     'rest_framework',
     'liff',
     'booking',
@@ -174,6 +175,21 @@ LINE_MESSAGING_CHANNEL_SECRET = env('LINE_MESSAGING_CHANNEL_SECRET', '')
 LINE_MESSAGING_CHANNEL_ACCESS_TOKEN = env('LINE_MESSAGING_CHANNEL_ACCESS_TOKEN', '')
 # 官方帳號 Basic ID（含 @），liff.requestFriendship() 無法使用時改開加好友連結；可留空
 LINE_OA_BASIC_ID = env('LINE_OA_BASIC_ID', '')
+
+# django-q2：以 PostgreSQL 當 broker，背景任務與排程都用這個
+# 任務失敗不 ack（ack_failures=False），retry 秒後重新派送，最多 max_attempts 次。
+# retry 必須大於 timeout，否則任務還在執行就會被重派。
+Q_CLUSTER = {
+    'name': 'line_liff',
+    'orm': 'default',
+    'workers': 2,
+    'timeout': 60,
+    'retry': 120,
+    'max_attempts': 5,
+    'catch_up': False,  # 停機後重啟不補跑錯過的排程；掃描工作下一次執行就會處理
+    'save_limit': 500,
+    'label': '背景任務',
+}
 
 LOGGING = {
     'version': 1,

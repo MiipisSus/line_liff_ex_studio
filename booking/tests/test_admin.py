@@ -36,8 +36,7 @@ CHANGELIST = reverse("admin:booking_booking_changelist")
 
 @pytest.fixture
 def no_push(monkeypatch):
-    monkeypatch.setattr("line_bot.notifications.notify_booking_confirmed", lambda b: None)
-    monkeypatch.setattr("line_bot.notifications.notify_booking_cancelled_by_shop", lambda b: None)
+    monkeypatch.setattr("line_bot.notifications.enqueue_booking_notification", lambda booking_id, kind: None)
 
 
 def run_action(admin_client, action, bookings, **extra):

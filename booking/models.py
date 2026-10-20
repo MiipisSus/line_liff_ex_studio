@@ -29,6 +29,14 @@ class Shop(models.Model):
     no_show_limit = models.PositiveSmallIntegerField(
         "no-show 上限", default=3, help_text="累積達此次數後限制預約；0 代表不限制"
     )
+    reminder_hours_before = models.PositiveSmallIntegerField(
+        "提醒時間（開始前幾小時）", default=24, help_text="已確認的預約在開始前幾小時推播提醒；0 代表不提醒"
+    )
+    pending_auto_cancel_hours = models.PositiveSmallIntegerField(
+        "未確認自動取消（開始前幾小時）", default=3,
+        help_text="開始前幾小時仍未確認就自動取消並通知顧客；0 代表不自動取消。"
+        "顧客可預約的最早時段會自動延後到此時間再加 1 小時，保留時間給店家確認",
+    )
 
     class Meta:
         verbose_name = "店家設定"
@@ -215,6 +223,8 @@ class Booking(models.Model):
     # 狀態轉換一律透過 service layer，不要直接改這個欄位
     status = models.CharField("狀態", max_length=20, choices=BookingStatus.choices, default=BookingStatus.PENDING)
     cancelled_by = models.CharField("取消者", max_length=10, choices=CancelledBy.choices, blank=True)
+    # 已排入前一天提醒（或確認通知已涵蓋提醒）的時間；排程以此保證不重複提醒
+    reminded_at = models.DateTimeField("已提醒時間", null=True, blank=True)
     created_at = models.DateTimeField("建立時間", auto_now_add=True)
     updated_at = models.DateTimeField("更新時間", auto_now=True)
 

@@ -108,13 +108,30 @@ def get_bookable_staff(service, staff=None):
     return list(qs.values_list("pk", flat=True))
 
 
-def get_available_slots(service: Service, day: date, staff: Staff | None = None, now: datetime | None = None):
+# 顧客預約後至少保留這麼久給店家確認，才會進入「未確認自動取消」的範圍
+CONFIRM_BUFFER_MINUTES = 60
+
+
+def customer_min_advance_minutes(shop):
+    """顧客最少需提前多久預約：取店家設定與「自動取消時間 + 確認緩衝」較大者，
+    避免顧客剛預約完、店家還來不及確認就被排程自動取消。"""
+    auto_cancel = shop.pending_auto_cancel_hours * 60 + CONFIRM_BUFFER_MINUTES if shop.pending_auto_cancel_hours else 0
+    return max(shop.min_advance_minutes, auto_cancel)
+
+
+def get_available_slots(
+    service: Service, day: date, staff: Staff | None = None, now: datetime | None = None,
+    min_advance_minutes: int | None = None,
+):
     """回傳 day（店家當地日期）中可預約 service 的時段。
 
     staff 為 None 代表「不指定人員」：任一位可執行此服務的人員有空就列出，
     Slot.staff_ids 為該時段所有有空的人員，建立預約時再從中分配。
+    min_advance_minutes 預設為顧客的限制（customer_min_advance_minutes）；店家插單傳 0。
     """
     shop = Shop.load()
+    if min_advance_minutes is None:
+        min_advance_minutes = customer_min_advance_minutes(shop)
     now = now or timezone.now()
     today = now.astimezone(SHOP_TZ).date()
 
@@ -129,7 +146,7 @@ def get_available_slots(service: Service, day: date, staff: Staff | None = None,
     day_end = _local_dt(day + timedelta(days=1), time.min)
     duration = timedelta(minutes=service.duration_minutes)
     step = timedelta(minutes=shop.slot_interval_minutes)
-    earliest = now + timedelta(minutes=shop.min_advance_minutes)
+    earliest = now + timedelta(minutes=min_advance_minutes)
 
     working = _working_intervals(staff_ids, day)
     booked = _booked_intervals(staff_ids, day_start, day_end)
@@ -168,7 +185,7 @@ def check_customer_can_book(customer, shop):
         raise BookingNotAllowed("未到次數已達上限，暫時無法線上預約，請直接聯繫店家")
 
 
-def _insert_booking(customer, service, staff_id, start_at):
+def _insert_booking(customer, service, staff_id, start_at, status=Booking.Status.PENDING):
     try:
         # savepoint：讓 IntegrityError 不會讓外層交易整個失效
         with transaction.atomic():
@@ -179,6 +196,7 @@ def _insert_booking(customer, service, staff_id, start_at):
                 start_at=start_at,
                 end_at=start_at + timedelta(minutes=service.duration_minutes),
                 price=service.price,
+                status=status,
             )
     except IntegrityError as exc:
         # exclusion constraint 擋下重疊；正常情況下前面的鎖已避免走到這裡
@@ -188,24 +206,26 @@ def _insert_booking(customer, service, staff_id, start_at):
 def create_booking(customer, service, start_at, staff=None, now=None):
     """顧客線上建立預約（狀態 pending）。會檢查 no-show 上限。"""
     check_customer_can_book(customer, Shop.load())
-    return _create_within_schedule(customer, service, start_at, staff, now)
+    return _create_within_schedule(customer, service, start_at, staff, now, status=Booking.Status.PENDING)
 
 
 def create_booking_for_shop(customer, service, staff, start_at, allow_outside_schedule=False):
-    """店家代客建立預約（插單），不檢查顧客的 no-show 上限。
+    """店家代客建立預約（插單），直接為 confirmed，不檢查顧客的 no-show 上限與最少提前時間。
 
-    allow_outside_schedule=True 時再略過班表與提前 / 最遠預約天數，
+    allow_outside_schedule=True 時再略過班表與最遠預約天數，
     但仍受 exclusion constraint 約束，不能與既有預約重疊。
     """
     if not allow_outside_schedule:
-        return _create_within_schedule(customer, service, start_at, staff, now=None)
+        return _create_within_schedule(
+            customer, service, start_at, staff, now=None, status=Booking.Status.CONFIRMED, min_advance_minutes=0
+        )
     if not service.staff.filter(pk=staff.pk).exists():
         raise SlotUnavailable(f"{staff} 不能執行「{service}」")
     with transaction.atomic():
-        return _insert_booking(customer, service, staff.pk, start_at)
+        return _insert_booking(customer, service, staff.pk, start_at, status=Booking.Status.CONFIRMED)
 
 
-def _create_within_schedule(customer, service, start_at, staff, now):
+def _create_within_schedule(customer, service, start_at, staff, now, status, min_advance_minutes=None):
     """在可預約時段內建立預約。
 
     併發控制分兩層：
@@ -227,14 +247,17 @@ def _create_within_schedule(customer, service, start_at, staff, now):
 
         day = start_at.astimezone(SHOP_TZ).date()
         slot = next(
-            (s for s in get_available_slots(service, day, staff=staff, now=now) if s.start_at == start_at),
+            (
+                s for s in get_available_slots(service, day, staff=staff, now=now, min_advance_minutes=min_advance_minutes)
+                if s.start_at == start_at
+            ),
             None,
         )
         if slot is None:
             raise SlotUnavailable("這個時段已無法預約，請選擇其他時段")
 
         # 不指定人員時，分給有空的人員中排序最前面的一位
-        return _insert_booking(customer, service, slot.staff_ids[0], start_at)
+        return _insert_booking(customer, service, slot.staff_ids[0], start_at, status=status)
 
 
 # --- 狀態轉換 ---------------------------------------------------------------------
@@ -274,17 +297,26 @@ def _transition(booking_id, to_status, **extra_fields):
         return booking
 
 
-def confirm_booking(booking):
-    """店家確認預約，push 通知顧客。"""
-    booking = _transition(booking.pk, Booking.Status.CONFIRMED)
-    _notify_on_commit(notifications.notify_booking_confirmed, booking)
+def confirm_booking(booking, now=None):
+    """店家確認預約，push 通知顧客。
+
+    若確認時已進入提醒時間範圍，確認通知本身就包含時間資訊，直接視為已提醒，
+    避免排程緊接著再推一則提醒。
+    """
+    now = now or timezone.now()
+    extra = {}
+    hours = Shop.load().reminder_hours_before
+    if hours and booking.start_at - now <= timedelta(hours=hours):
+        extra["reminded_at"] = now
+    booking = _transition(booking.pk, Booking.Status.CONFIRMED, **extra)
+    _notify_on_commit(booking.pk, "confirmed")
     return booking
 
 
 def cancel_booking_by_shop(booking):
     """店家取消預約，push 通知顧客。"""
     booking = _transition(booking.pk, Booking.Status.CANCELLED, cancelled_by=Booking.CancelledBy.SHOP)
-    _notify_on_commit(notifications.notify_booking_cancelled_by_shop, booking)
+    _notify_on_commit(booking.pk, "cancelled_by_shop")
     return booking
 
 
@@ -321,9 +353,9 @@ def cancel_booking_by_customer(booking_id, customer, now=None):
         return _transition(booking.pk, Booking.Status.CANCELLED, cancelled_by=Booking.CancelledBy.CUSTOMER)
 
 
-def _notify_on_commit(func, booking):
-    # 交易 commit 後才發送：避免狀態回滾了通知卻已送出；發送失敗也不影響狀態
-    transaction.on_commit(lambda: func(booking))
+def _notify_on_commit(booking_id, kind):
+    # 交易 commit 後才排入背景任務：避免狀態回滾了通知卻已送出；發送失敗由 django-q2 重試，不影響狀態
+    transaction.on_commit(lambda: notifications.enqueue_booking_notification(booking_id, kind))
 
 
 def get_upcoming_bookings(customer, now=None, limit=10):
@@ -368,3 +400,58 @@ def find_bookings_outside_schedule(staff_ids=None, date_from=None, date_to=None)
         if not any(start <= booking.start_at and booking.end_at <= end for start, end in intervals):
             affected.append(booking)
     return affected
+
+
+# --- 排程工作（由 booking/tasks.py 以 django-q2 定期執行）--------------------------
+#
+# 兩個工作都是「掃描資料庫 + 冪等」：重複執行、延遲執行或同時執行都不會重複處理。
+
+
+def send_due_reminders(now=None):
+    """排入「已確認、尚未提醒、且已進入提醒時間範圍」的預約提醒，回傳排入筆數。
+
+    先在交易內以 reminded_at 認領（skip_locked 讓同時執行的工作不會搶同一筆），
+    commit 後才排入推播任務；推播失敗由任務重試，不會因此重複認領。
+    """
+    now = now or timezone.now()
+    hours = Shop.load().reminder_hours_before
+    if not hours:
+        return 0
+    with transaction.atomic():
+        due = list(
+            Booking.objects.select_for_update(skip_locked=True)
+            .filter(
+                status=Booking.Status.CONFIRMED,
+                reminded_at__isnull=True,
+                start_at__gt=now,
+                start_at__lte=now + timedelta(hours=hours),
+            )
+            .values_list("pk", flat=True)
+        )
+        Booking.objects.filter(pk__in=due).update(reminded_at=now)
+        for booking_id in due:
+            _notify_on_commit(booking_id, "reminder")
+    return len(due)
+
+
+def cancel_unconfirmed_bookings(now=None):
+    """自動取消「開始前 pending_auto_cancel_hours 小時仍未確認」的預約並通知顧客，回傳取消筆數。"""
+    now = now or timezone.now()
+    hours = Shop.load().pending_auto_cancel_hours
+    if not hours:
+        return 0
+    due = Booking.objects.filter(
+        status=Booking.Status.PENDING, start_at__lte=now + timedelta(hours=hours)
+    ).values_list("pk", flat=True)
+
+    cancelled = 0
+    for booking_id in due:
+        try:
+            with transaction.atomic():
+                _transition(booking_id, Booking.Status.CANCELLED, cancelled_by=Booking.CancelledBy.SYSTEM)
+                _notify_on_commit(booking_id, "auto_cancelled")
+            cancelled += 1
+        except InvalidTransition:
+            # 掃描後、取消前店家剛好確認或取消了：以最新狀態為準，略過
+            continue
+    return cancelled

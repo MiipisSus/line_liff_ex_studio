@@ -5,7 +5,6 @@ from django.db import transaction
 
 from booking import services
 from booking.models import Booking, ScheduleException
-from line_bot import client
 
 from .fixtures import DAY, NOW, local
 
@@ -14,10 +13,11 @@ pytestmark = pytest.mark.usefixtures("shop")
 
 @pytest.fixture
 def pushed(monkeypatch):
-    """攔截推播通知，記錄 (通知名稱, booking id)。"""
+    """攔截排入的推播任務，記錄 (通知種類, booking id)。"""
     calls = []
-    for name in ("notify_booking_confirmed", "notify_booking_cancelled_by_shop"):
-        monkeypatch.setattr(f"line_bot.notifications.{name}", lambda b, name=name: calls.append((name, b.pk)))
+    monkeypatch.setattr(
+        "line_bot.notifications.enqueue_booking_notification", lambda booking_id, kind: calls.append((kind, booking_id))
+    )
     return calls
 
 
@@ -34,7 +34,7 @@ def test_confirm_pushes_after_commit(pending, pushed, django_capture_on_commit_c
         booking = services.confirm_booking(pending)
 
     assert booking.status == Booking.Status.CONFIRMED
-    assert pushed == [("notify_booking_confirmed", pending.pk)]
+    assert pushed == [("confirmed", pending.pk)]
 
 
 def test_no_push_when_transaction_rolls_back(pending, pushed, django_capture_on_commit_callbacks):
@@ -54,7 +54,7 @@ def test_cancel_by_shop(pending, pushed, django_capture_on_commit_callbacks):
 
     assert booking.status == Booking.Status.CANCELLED
     assert booking.cancelled_by == Booking.CancelledBy.SHOP
-    assert pushed == [("notify_booking_cancelled_by_shop", pending.pk)]
+    assert pushed == [("cancelled_by_shop", pending.pk)]
 
 
 @pytest.mark.parametrize("func, expected", [
@@ -93,20 +93,6 @@ def test_transition_uses_fresh_status(pending, pushed):
 
     with pytest.raises(services.InvalidTransition):
         services.confirm_booking(pending)
-
-
-def test_push_failure_does_not_undo_status(pending, monkeypatch, settings, django_capture_on_commit_callbacks):
-    settings.LINE_MESSAGING_CHANNEL_ACCESS_TOKEN = "token"
-
-    def fail(*args, **kwargs):
-        raise client.LineMessagingError("boom")
-    monkeypatch.setattr(client, "push_message", fail)
-
-    with django_capture_on_commit_callbacks(execute=True):
-        services.confirm_booking(pending)
-
-    pending.refresh_from_db()
-    assert pending.status == Booking.Status.CONFIRMED
 
 
 def test_cancelled_booking_frees_slot(pending, pushed, haircut, alice):
