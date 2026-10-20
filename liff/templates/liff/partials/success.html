@@ -1,4 +1,4 @@
-<div class="alert alert-success">預約已送出，店家確認後會再通知您。</div>
+<div id="booking-created" data-booking-id="{{ booking.pk }}" class="alert alert-success">預約已送出，店家確認後會再通知您。</div>
 
 <ul class="list-group mb-3">
   <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">服務</span><span>{{ booking.service.name }}</span></li>
@@ -7,5 +7,12 @@
   <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">價格</span><span>NT$ {{ booking.price }}</span></li>
   <li class="list-group-item d-flex justify-content-between"><span class="text-secondary">狀態</span><span>{{ booking.get_status_display }}</span></li>
 </ul>
+
+{% if show_friend_notice %}
+  <div id="friend-notice" class="alert alert-warning">
+    <p class="mb-2">您尚未加入官方帳號好友，將<strong>無法收到</strong>預約確認、變更與前一天的提醒通知。</p>
+    <button type="button" class="btn btn-success w-100" data-request-friendship data-fallback-url="{{ add_friend_url }}">加入官方帳號好友</button>
+  </div>
+{% endif %}
 
 <button type="button" class="btn btn-outline-primary w-100" hx-get="{% url 'liff-book-services' %}">再預約一筆</button>

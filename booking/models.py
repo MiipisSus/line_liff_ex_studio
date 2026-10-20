@@ -198,6 +198,11 @@ class Booking(models.Model):
     Status = BookingStatus
     BLOCKING_STATUSES = BLOCKING_STATUSES
 
+    class CancelledBy(models.TextChoices):
+        CUSTOMER = "customer", "顧客"
+        SHOP = "shop", "店家"
+        SYSTEM = "system", "系統"
+
     customer = models.ForeignKey(
         "liff.Customer", verbose_name="顧客", on_delete=models.PROTECT, related_name="bookings"
     )
@@ -209,6 +214,7 @@ class Booking(models.Model):
     price = models.PositiveIntegerField("價格（元）")
     # 狀態轉換一律透過 service layer，不要直接改這個欄位
     status = models.CharField("狀態", max_length=20, choices=BookingStatus.choices, default=BookingStatus.PENDING)
+    cancelled_by = models.CharField("取消者", max_length=10, choices=CancelledBy.choices, blank=True)
     created_at = models.DateTimeField("建立時間", auto_now_add=True)
     updated_at = models.DateTimeField("更新時間", auto_now=True)
 

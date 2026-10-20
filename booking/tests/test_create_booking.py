@@ -11,7 +11,7 @@ from booking.services import (
     create_booking_for_shop,
 )
 
-from .conftest import NOW, local
+from .fixtures import NOW, local
 
 pytestmark = pytest.mark.usefixtures("shop")
 

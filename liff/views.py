@@ -10,6 +10,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from booking import services as booking_services
 from booking.models import SHOP_TZ, Service, Shop, Weekday
+from line_bot import services as line_services
 
 from . import services
 from .forms import BookingForm, SlotQueryForm
@@ -131,4 +132,10 @@ def book_create(request):
             "date": data["start_at"].astimezone(SHOP_TZ).date(),
         }, status=409)
 
-    return render(request, "liff/partials/success.html", {"booking": booking})
+    # 非好友收不到確認 / 提醒推播，在成功畫面提醒加好友；無法判斷（None）時不打擾
+    is_friend = line_services.refresh_friendship(request.customer)
+    return render(request, "liff/partials/success.html", {
+        "booking": booking,
+        "show_friend_notice": is_friend is False,
+        "add_friend_url": f"https://line.me/R/ti/p/{settings.LINE_OA_BASIC_ID}" if settings.LINE_OA_BASIC_ID else "",
+    })

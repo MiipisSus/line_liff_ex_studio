@@ -29,7 +29,7 @@ LINE 預約系統（LIFF / LINE MINI App + Messaging API + Django 後台）。
 
 - 依賴：`pip install -r requirements-dev.txt`（正式環境只裝 `requirements.txt`）。
 - 資料庫：本機使用 Postgres.app（`localhost:5432`，資料庫 `line_liff`）；`docker-compose.yml` 目前只有 `db` 服務，尚未實測。測試也跑在 PostgreSQL 上，不使用 SQLite。
-- 測試：`pytest`（設定在 `pytest.ini`）。外部 HTTP 呼叫（LINE API）一律用 `responses` mock。
+- 測試：`pytest`（設定在 `pytest.ini`）。外部 HTTP 呼叫（LINE API）一律用 `responses` mock。共用 fixture 在 `booking/tests/fixtures.py`，由根目錄 `conftest.py` 的 `pytest_plugins` 載入，各 app 直接使用即可，不要再個別 import fixture。
 - 示範資料：`python manage.py seed_demo`（已有人員時略過）。
 - 後台的 `Booking` 目前唯讀；建立預約與狀態轉換必須經過 service layer。
 - LIFF 預約流程在 `liff/views.py`（`/liff/book/...`），每一步回傳 `liff/templates/liff/partials/` 的 HTMX partial，畫面替換到 `#app`：
@@ -46,6 +46,13 @@ LINE 預約系統（LIFF / LINE MINI App + Messaging API + Django 後台）。
 - **LINE MINI App channel**：放 LIFF 頁面，地區選台灣。新的 LIFF 一律建在 MINI App channel，不使用 Messaging API channel 掛 LIFF 的舊做法。
   - LIFF scope 必須勾選 `openid`（否則 `getIDToken()` 回傳 `null`）與 `profile`（否則 ID token 沒有 `name`）。
   - `LINE_CHANNEL_ID` 是 **MINI App channel** 的 ID（即 LIFF ID 中 `-` 前面的數字），用於驗證 ID token 的 `aud`；不是 Messaging API channel 的 ID。
+  - LIFF scope 另需勾選 `chat_message.write`（預約成功後 `liff.sendMessages()` 用）。
+  - LIFF 畫面尺寸需為 `Full`，且要連結官方帳號（add friend option），`liff.requestFriendship()` 才能彈出加好友視窗；否則改開 `LINE_OA_BASIC_ID` 的加好友連結（選填）。
+- **Messaging API channel 設定**：
+  - `.env` 填 `LINE_MESSAGING_CHANNEL_SECRET`、`LINE_MESSAGING_CHANNEL_ACCESS_TOKEN`（long-lived）。未設定時 webhook 一律回 400、推播略過。
+  - Webhook URL 設為 `https://<網域>/line/webhook/`，開啟「Use webhook」。
+  - 在 LINE Official Account Manager 關閉「自動回應訊息」與「加入好友的歡迎訊息」，避免和 bot 重複回覆。
+  - Rich Menu 用 `python manage.py setup_richmenu` 建立（圖片在 `line_bot/assets/richmenu.png`，會刪除同名舊選單）。API 設定的預設選單優先於 OA Manager 設定的選單。
 - **Messaging API channel**：用於 bot、Rich Menu、通知。
 - **LIFF SDK**：使用 CDN 的 `https://static.line-scdn.net/liff/edge/2/sdk.js`；若用 npm 安裝，版本必須 >= 2.31.1（2.27.x 已因安全問題棄用）。
 - 機密資料（channel secret、access token、LIFF ID）一律放 `.env`，不得 commit。
@@ -96,21 +103,36 @@ Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 40
 - 由使用者主動觸發的互動（查詢、預約確認），一律用 **reply message**，這類訊息不計費。
 - 只有必要時才用 **push**：前一天提醒、店家變更或取消預約。
 - 不做全體群發功能，或至少把它限制在後台，並加上確認步驟。
-- 每一種通知都要在程式碼中標明是 reply 還是 push，方便估算每月訊息量。
+- 每一種通知都要在程式碼中標明是 reply 還是 push，方便估算每月訊息量（`line_bot/client.py` 的 `reply_message()` / `push_message()`，呼叫點加註【reply・不計費】/【push・計費】）。
+- LIFF 送出預約不會產生 replyToken，無法直接 reply；MINI App 的 service message 只限通過審核的 MINI App。因此：LIFF 從官方帳號聊天室開啟時，預約成功後以 `liff.sendMessages()` 代替顧客送出「我已完成預約 #ID」，webhook 收到後 reply 明細；不是從聊天室開啟就只顯示 LIFF 成功畫面，不改用 push。
+
+| 通知 | 觸發 | 類型 |
+|---|---|---|
+| 預約明細 | 預約成功後 LIFF `sendMessages()` → webhook | reply |
+| 我的預約列表 | Rich Menu postback 或輸入「我的預約」 | reply |
+| 取消確認 / 取消結果 | 列表上的「取消預約」按鈕（postback） | reply |
+| 歡迎訊息 | 加入好友（follow） | reply |
+| 預約已確認 | 店家在後台確認 | push |
+| 預約已被店家取消 | 店家在後台取消 | push |
+
+- push 一律在 `transaction.on_commit` 後發送，失敗只記 log，不回滾狀態；`X-Line-Retry-Key` 由「預約 ID + 狀態」產生，重送不會重複推播。完成、未到、顧客自行取消都不推播。
+- webhook 只回覆上述關鍵字與 postback，其他文字不回，保留給店家在 OA Manager 手動回覆。
+- **好友狀態**：非好友收不到 push。`Customer.is_line_friend`（`None` = 未知）由 webhook follow / unfollow 更新，預約成功時再以 `GET /v2/bot/profile/{userId}`（不計費，404 = 未加好友或已封鎖）確認，見 `line_bot.services.refresh_friendship()`。確認為非好友時，LIFF 成功畫面提醒並提供「加入官方帳號好友」按鈕；查詢失敗時不提醒，也不影響預約。
 
 ## 里程碑
 
 1. ✅ **身分打通**：在 LINE 中打開 LIFF，畫面顯示「你好，{名稱}」，後端資料庫建立 Customer。（已透過 ngrok 在手機上實測通過；尚未部署到 VPS）
 2. ✅ **時段模型**：後台可以設定營業時間、服務、人員、例外日，API 能回傳某日可預約的時段。
-3. **建立預約**：LIFF 完成選服務、選時段、確認、送出；併發測試通過。（已實作並通過測試，待手機實測）
+3. ✅ **建立預約**：LIFF 完成選服務、選時段、確認、送出；併發測試通過。（UI 細節優化留到里程碑 6）
    - 前端只送 `service`、`start_at`、（選填）`staff`；`end_at` 與價格由後端決定。
    - 建立時在交易內重新呼叫 `get_available_slots()` 驗證，並加上 exclusion constraint（同一人員、`BLOCKING_STATUSES` 時間不可重疊）。
    - `Booking` 加 `price` 快照，建立時從 `Service` 複製，之後不隨服務設定變動。
    - 店家插單的 service 函式可帶 `allow_outside_schedule`，略過班表檢查，但仍受重疊約束。
    - 實作：`booking/services.py` 的 `create_booking()`（顧客，檢查 no-show 上限）與 `create_booking_for_shop()`（店家，不檢查 no-show）。併發控制 = 依 pk 順序 `select_for_update()` 鎖住候選人員 → 重新計算時段 → 寫入；exclusion constraint `booking_no_overlap_per_staff` 為最後防線。「不指定人員」分給有空人員中排序最前面的一位。店家插單的後台介面留到里程碑 6。
    - 併發測試在 `booking/tests/test_concurrency.py`（`transaction=True` + 多執行緒）。拿掉鎖時「不指定人員」測試會失敗，修改這段邏輯後務必重跑。
-4. **Bot 通知**：預約成功時用 reply 通知；店家改變狀態時用 push 通知。Rich Menu 提供「我要預約」和「我的預約」。
+4. **Bot 通知**：預約成功時用 reply 通知；店家改變狀態時用 push 通知。Rich Menu 提供「我要預約」和「我的預約」。（已實作並通過測試，待 LINE 平台設定與手機實測）
    - 店家在已有預約的日期新增休假或修改班表時，後台要列出受影響的預約並提示。
+   - 實作：狀態機在 `booking/services.py`（`ALLOWED_TRANSITIONS`，轉換時 `select_for_update` 以資料庫狀態為準）；顧客取消檢查取消期限並記錄 `cancelled_by`。webhook 在 `line_bot/`。後台預約列表以 admin action 操作狀態，店家取消有確認頁；班表 / 例外日存檔後以 `find_bookings_outside_schedule()` 提示受影響預約。
 5. **排程**：前一天提醒；逾時未確認的預約自動取消。
 6. **後台打磨與文件**：店家操作流程順暢，並撰寫交付用的 README（部署方式、環境變數、操作說明）。
    - 完成預約時可填「實收金額」`final_price`（預設等於 `price`），不做金流。

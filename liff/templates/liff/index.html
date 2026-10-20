@@ -40,10 +40,39 @@
       { code: "4..", swap: true, error: true },
       { code: "...", swap: false, error: true },
     ];
-    // 換畫面後把選取中的日期捲到日期列中間，避免每次都跳回最左邊
     document.body.addEventListener("htmx:afterSwap", () => {
+      // 換畫面後把選取中的日期捲到日期列中間，避免每次都跳回最左邊
       document.querySelector('.day-strip [aria-pressed="true"]')
         ?.scrollIntoView({ inline: "center", block: "nearest" });
+
+      // 預約成功：從官方帳號聊天室開啟時，以顧客名義送出一則文字，
+      // 讓 bot 透過 webhook 用 reply（不計費）回覆預約明細。
+      // 需要 LIFF scope chat_message.write；不是從聊天室開啟或未授權時靜默略過，畫面上已有成功訊息。
+      const created = document.getElementById("booking-created");
+      if (created && liff.getContext()?.type === "utou") {
+        liff.sendMessages([{ type: "text", text: `我已完成預約 #${created.dataset.bookingId}` }])
+          .catch((err) => console.warn("sendMessages 失敗", err));
+      }
+    });
+    // 「加入官方帳號好友」：優先用 liff.requestFriendship() 在 LIFF 內彈出加好友視窗
+    // （需 LIFF 畫面尺寸為 Full）；失敗時改開加好友連結。加好友後由 webhook follow 事件更新後端狀態。
+    document.body.addEventListener("click", async (e) => {
+      const button = e.target.closest("[data-request-friendship]");
+      if (!button) return;
+      try {
+        await liff.requestFriendship();
+        const { friendFlag } = await liff.getFriendship();
+        if (friendFlag) {
+          document.getElementById("friend-notice")?.replaceChildren(
+            Object.assign(document.createElement("span"), { textContent: "已加入好友，之後會透過 LINE 通知您。" })
+          );
+        }
+      } catch (err) {
+        console.warn("requestFriendship 失敗", err);
+        if (button.dataset.fallbackUrl) {
+          liff.openWindow({ url: button.dataset.fallbackUrl, external: false });
+        }
+      }
     });
     document.body.addEventListener("htmx:responseError", (e) => {
       if (e.detail.xhr.status >= 500) {

@@ -3,9 +3,7 @@ from django.test import Client
 from django.urls import reverse
 
 from booking.models import Booking
-from booking.tests.conftest import (  # noqa: F401 — pytest fixtures
-    DAY, NOW, alice, bob, customer, haircut, local, make_booking, shop,
-)
+from booking.tests.fixtures import DAY, NOW, local
 from liff.models import Customer
 from liff.services import SESSION_CUSTOMER_KEY
 

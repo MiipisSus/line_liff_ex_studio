@@ -3,7 +3,7 @@ from django.urls import reverse
 
 from booking.models import Service
 
-from .conftest import DAY, NOW
+from .fixtures import DAY, NOW
 
 AVAILABILITY_URL = reverse("api-availability")
 

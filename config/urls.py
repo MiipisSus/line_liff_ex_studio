@@ -21,4 +21,5 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path("liff/", include("liff.urls")),
     path("api/", include("booking.urls")),
+    path("line/", include("line_bot.urls")),
 ]

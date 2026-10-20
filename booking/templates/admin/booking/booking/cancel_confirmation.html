@@ -1,0 +1,28 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">首頁</a>
+  › <a href="{% url 'admin:booking_booking_changelist' %}">{{ opts.verbose_name_plural }}</a>
+  › 店家取消
+</div>
+{% endblock %}
+
+{% block content %}
+<p>以下預約將被取消，系統會<strong>推播通知</strong>每位顧客（計入每月訊息額度）：</p>
+<ul>
+  {% for booking in bookings %}
+    <li>{{ booking.start_at|date:"Y/m/d H:i" }}　{{ booking.customer }}・{{ booking.service }}・{{ booking.staff }}（{{ booking.get_status_display }}）</li>
+  {% endfor %}
+</ul>
+<form method="post">
+  {% csrf_token %}
+  {% for booking in bookings %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ booking.pk }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="cancel_by_shop">
+  <input type="hidden" name="confirm" value="yes">
+  <input type="submit" value="確定取消">
+  <a href="{% url 'admin:booking_booking_changelist' %}" class="button cancel-link">返回</a>
+</form>
+{% endblock %}

@@ -5,7 +5,7 @@ import pytest
 from booking.models import Booking, ScheduleException, Service, Staff, WorkingHours
 from booking.services import get_available_slots
 
-from .conftest import DAY, NOW, local, hhmm
+from .fixtures import DAY, NOW, local, hhmm
 
 ALICE_ALL = ["10:00", "10:30", "11:00", "11:30", "12:00",
              "14:00", "14:30", "15:00", "15:30", "16:00", "16:30", "17:00"]

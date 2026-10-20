@@ -13,7 +13,7 @@ from booking.models import Booking
 from booking.services import SlotUnavailable, create_booking
 from liff.models import Customer
 
-from .conftest import NOW, local
+from .fixtures import NOW, local
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.usefixtures("shop")]
 

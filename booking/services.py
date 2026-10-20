@@ -1,4 +1,6 @@
-"""時段計算。
+"""預約相關商業邏輯：時段計算、建立預約、狀態轉換。
+
+時段計算：
 
 可預約時段 = (每週班表 ∪ 特別上班) − 休假（人員 / 全店） − 既有預約，
 再依服務時長與店家的時段間隔切出開始時間。不預先產生 slot 資料表。
@@ -10,6 +12,8 @@ from datetime import date, datetime, time, timedelta
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
+
+from line_bot import notifications
 
 from .models import SHOP_TZ, Booking, ScheduleException, Service, Shop, Staff, WorkingHours
 
@@ -231,3 +235,136 @@ def _create_within_schedule(customer, service, start_at, staff, now):
 
         # 不指定人員時，分給有空的人員中排序最前面的一位
         return _insert_booking(customer, service, slot.staff_ids[0], start_at)
+
+
+# --- 狀態轉換 ---------------------------------------------------------------------
+#
+# pending → confirmed → completed
+#    │          ├──────→ no_show
+#    └──────────┴──────→ cancelled
+#
+# 所有狀態變更都必須經過這裡，不要在 view / admin 直接改 status。
+
+ALLOWED_TRANSITIONS = {
+    Booking.Status.PENDING: {Booking.Status.CONFIRMED, Booking.Status.CANCELLED},
+    Booking.Status.CONFIRMED: {Booking.Status.COMPLETED, Booking.Status.NO_SHOW, Booking.Status.CANCELLED},
+}
+
+
+class InvalidTransition(BookingError):
+    """目前狀態不允許這個轉換。"""
+
+
+class CancelNotAllowed(BookingError):
+    """顧客不能取消（不是本人、已過取消期限）。"""
+
+
+def _transition(booking_id, to_status, **extra_fields):
+    """鎖住預約後檢查並套用狀態轉換，回傳更新後的 Booking。"""
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().select_related("customer", "service", "staff").get(pk=booking_id)
+        if to_status not in ALLOWED_TRANSITIONS.get(booking.status, set()):
+            raise InvalidTransition(
+                f"預約目前為「{booking.get_status_display()}」，無法變更為「{Booking.Status(to_status).label}」"
+            )
+        booking.status = to_status
+        for name, value in extra_fields.items():
+            setattr(booking, name, value)
+        booking.save(update_fields=["status", "updated_at", *extra_fields])
+        return booking
+
+
+def confirm_booking(booking):
+    """店家確認預約，push 通知顧客。"""
+    booking = _transition(booking.pk, Booking.Status.CONFIRMED)
+    _notify_on_commit(notifications.notify_booking_confirmed, booking)
+    return booking
+
+
+def cancel_booking_by_shop(booking):
+    """店家取消預約，push 通知顧客。"""
+    booking = _transition(booking.pk, Booking.Status.CANCELLED, cancelled_by=Booking.CancelledBy.SHOP)
+    _notify_on_commit(notifications.notify_booking_cancelled_by_shop, booking)
+    return booking
+
+
+def complete_booking(booking):
+    # 不通知：顧客當下就在店裡，不值得花一則 push
+    return _transition(booking.pk, Booking.Status.COMPLETED)
+
+
+def mark_no_show(booking):
+    # 不通知，避免與顧客起爭執；累積次數由 check_customer_can_book 使用
+    return _transition(booking.pk, Booking.Status.NO_SHOW)
+
+
+def ensure_customer_can_cancel(booking, now=None):
+    """檢查狀態與取消期限；不能取消時丟出 BookingError（訊息可直接給顧客看）。"""
+    now = now or timezone.now()
+    if Booking.Status.CANCELLED not in ALLOWED_TRANSITIONS.get(booking.status, set()):
+        raise CancelNotAllowed(f"這筆預約目前為「{booking.get_status_display()}」，無法取消")
+    hours = Shop.load().cancel_deadline_hours
+    if booking.start_at - now < timedelta(hours=hours):
+        raise CancelNotAllowed(f"開始前 {hours} 小時內無法線上取消，請直接聯繫店家")
+
+
+def cancel_booking_by_customer(booking_id, customer, now=None):
+    """顧客取消自己的預約。開始前 cancel_deadline_hours 小時內不可取消。
+
+    不在這裡發通知：顧客是從聊天室按鈕觸發，由 webhook 以 reply 回覆結果。
+    """
+    with transaction.atomic():
+        booking = Booking.objects.select_for_update().filter(pk=booking_id, customer=customer).first()
+        if booking is None:
+            raise CancelNotAllowed("找不到這筆預約")
+        ensure_customer_can_cancel(booking, now)
+        return _transition(booking.pk, Booking.Status.CANCELLED, cancelled_by=Booking.CancelledBy.CUSTOMER)
+
+
+def _notify_on_commit(func, booking):
+    # 交易 commit 後才發送：避免狀態回滾了通知卻已送出；發送失敗也不影響狀態
+    transaction.on_commit(lambda: func(booking))
+
+
+def get_upcoming_bookings(customer, now=None, limit=10):
+    now = now or timezone.now()
+    return list(
+        customer.bookings.filter(status__in=Booking.BLOCKING_STATUSES, start_at__gte=now)
+        .select_related("service", "staff")
+        .order_by("start_at")[:limit]
+    )
+
+
+# --- 班表異動檢查 -----------------------------------------------------------------
+
+
+def find_bookings_outside_schedule(staff_ids=None, date_from=None, date_to=None):
+    """找出佔用中、但已不在人員可上班時間內的預約（例如新增休假、修改班表之後）。
+
+    預設檢查從今天起到最遠可預約日。回傳 Booking 清單。
+    """
+    shop = Shop.load()
+    today = timezone.now().astimezone(SHOP_TZ).date()
+    date_from = date_from or today
+    date_to = date_to or today + timedelta(days=shop.max_advance_days)
+
+    qs = Booking.objects.filter(
+        status__in=Booking.BLOCKING_STATUSES,
+        start_at__gte=_local_dt(date_from, time.min),
+        start_at__lt=_local_dt(date_to + timedelta(days=1), time.min),
+    ).select_related("customer", "service", "staff").order_by("start_at")
+    if staff_ids is not None:
+        qs = qs.filter(staff_id__in=staff_ids)
+
+    bookings = list(qs)
+    involved_staff = list({b.staff_id for b in bookings})
+    affected = []
+    working_by_day = {}
+    for booking in bookings:
+        day = booking.start_at.astimezone(SHOP_TZ).date()
+        if day not in working_by_day:
+            working_by_day[day] = _working_intervals(involved_staff, day)
+        intervals = working_by_day[day][booking.staff_id]
+        if not any(start <= booking.start_at and booking.end_at <= end for start, end in intervals):
+            affected.append(booking)
+    return affected

@@ -68,6 +68,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'liff',
     'booking',
+    'line_bot',
 ]
 
 MIDDLEWARE = [
@@ -167,3 +168,19 @@ MAILERS = {
 # LIFF ID 格式為「{channel ID}-{亂數}」，LINE_CHANNEL_ID 即 LINE MINI App channel 的 ID
 LIFF_ID = env('LIFF_ID')
 LINE_CHANNEL_ID = env('LINE_CHANNEL_ID')
+
+# Messaging API channel（bot、Rich Menu、通知）。未設定時 webhook 一律拒絕、通知不送出
+LINE_MESSAGING_CHANNEL_SECRET = env('LINE_MESSAGING_CHANNEL_SECRET', '')
+LINE_MESSAGING_CHANNEL_ACCESS_TOKEN = env('LINE_MESSAGING_CHANNEL_ACCESS_TOKEN', '')
+# 官方帳號 Basic ID（含 @），liff.requestFriendship() 無法使用時改開加好友連結；可留空
+LINE_OA_BASIC_ID = env('LINE_OA_BASIC_ID', '')
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {'console': {'class': 'logging.StreamHandler'}},
+    'loggers': {
+        'line_bot': {'handlers': ['console'], 'level': 'INFO'},
+        'booking': {'handlers': ['console'], 'level': 'INFO'},
+    },
+}

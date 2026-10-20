@@ -7,6 +7,8 @@ class Customer(models.Model):
     line_user_id = models.CharField("LINE userId", max_length=64, unique=True)
     display_name = models.CharField("顯示名稱", max_length=255, blank=True)
     phone = models.CharField("電話", max_length=32, blank=True)
+    # None = 未知（尚未查詢）；由 webhook follow / unfollow 與預約成功時的 profile 查詢更新
+    is_line_friend = models.BooleanField("官方帳號好友", null=True, blank=True)
     created_at = models.DateTimeField("建立時間", auto_now_add=True)
     updated_at = models.DateTimeField("更新時間", auto_now=True)
 
