@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 
 import os
 from pathlib import Path
+from urllib.parse import parse_qsl, unquote, urlparse
 
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
@@ -29,6 +30,22 @@ def env(name, default=None):
 
 def env_bool(name, default=False):
     return env(name, str(default)).lower() in ("1", "true", "yes")
+
+
+def database_from_url(url):
+    """把 postgres://user:pass@host:port/name?sslmode=require 轉成 Django DATABASES 設定。"""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("postgres", "postgresql"):
+        raise ImproperlyConfigured("DATABASE_URL 只支援 PostgreSQL")
+    return {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': unquote(parsed.path.lstrip('/')),
+        'USER': unquote(parsed.username or ''),
+        'PASSWORD': unquote(parsed.password or ''),
+        'HOST': parsed.hostname or '',
+        'PORT': str(parsed.port or 5432),
+        'OPTIONS': dict(parse_qsl(parsed.query)),  # 例如 sslmode=require
+    }
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -105,16 +122,23 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': env('DB_NAME', 'line_liff'),
-        'USER': env('DB_USER', ''),
-        'PASSWORD': env('DB_PASSWORD', ''),
-        'HOST': env('DB_HOST', 'localhost'),
-        'PORT': env('DB_PORT', '5432'),
+# 有 DATABASE_URL（Fly.io + 外部 Postgres，例如 Neon）時優先使用，否則讀 DB_* 個別設定
+if env('DATABASE_URL', ''):
+    DATABASES = {'default': database_from_url(env('DATABASE_URL'))}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': env('DB_NAME', 'line_liff'),
+            'USER': env('DB_USER', ''),
+            'PASSWORD': env('DB_PASSWORD', ''),
+            'HOST': env('DB_HOST', 'localhost'),
+            'PORT': env('DB_PORT', '5432'),
+        }
     }
-}
+# 外部 Postgres（Neon 等）閒置時會斷線；重用連線前先檢查，避免機器喚醒後第一個請求失敗
+DATABASES['default']['CONN_MAX_AGE'] = 60
+DATABASES['default']['CONN_HEALTH_CHECKS'] = True
 
 
 # Password validation
@@ -153,6 +177,12 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+# collectstatic 輸出位置；Fly.io 由 fly.toml 的 [[statics]] 直接提供，不經過 Django
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+if not DEBUG:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
 
 
 # Email
@@ -187,6 +217,9 @@ Q_CLUSTER = {
     'retry': 120,
     'max_attempts': 5,
     'catch_up': False,  # 停機後重啟不補跑錯過的排程；掃描工作下一次執行就會處理
+    # 沒有常駐 qcluster 的環境（Fly.io scale-to-zero）設 TASKS_SYNC=True：推播在呼叫當下直接發送，
+    # 失敗記錄到 line_bot.FailedNotification，由 run_scheduled_jobs 每小時重試（見 line_bot/notifications.py）
+    'sync': env_bool('TASKS_SYNC'),
     'save_limit': 500,
     'label': '背景任務',
 }

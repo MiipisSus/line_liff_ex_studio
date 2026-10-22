@@ -1,0 +1,12 @@
+.git
+.venv
+venv
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+db.sqlite3
+staticfiles/
+.vscode/
+.idea/
+.DS_Store

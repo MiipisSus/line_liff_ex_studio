@@ -1,0 +1,39 @@
+# Fly.io 設定（作品集 / 低流量：壓在免費額度內）
+# 部署步驟見 docs/deploy-fly.md；請用 scripts/fly-deploy.sh 部署，它會同時更新排程機器的 image。
+
+app = "line-liff-booking"  # 改成你的 app 名稱（fly apps create 時取的）
+primary_region = "sin"     # 與外部 Postgres 同區域（Neon 選 AWS ap-southeast-1 Singapore）
+
+[build]
+  dockerfile = "Dockerfile"
+
+[deploy]
+  # 每次部署在臨時機器跑 migration，失敗就中止部署
+  release_command = "python manage.py migrate --noinput"
+
+[env]
+  DJANGO_DEBUG = "False"
+  # Fly proxy 會設定 X-Forwarded-Proto，且機器不直接對外，可以開啟
+  DJANGO_BEHIND_PROXY = "True"
+  DJANGO_ALLOWED_HOSTS = "line-liff-booking.fly.dev"  # 換成你的網域
+  # 沒有常駐 qcluster：背景任務同步執行，失敗的推播由排程機器每小時重試
+  TASKS_SYNC = "True"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # Scale-to-zero：沒有流量就停機，不計 CPU / 記憶體費用。
+  # 用 suspend 而不是 stop：喚醒只需數百毫秒（stop 要重新開機、載入 Django，數秒），
+  # LINE webhook 與 LIFF 第一次開啟比較不會逾時。suspend 有問題時改回 "stop"。
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"  # 被 OOM 砍掉（fly logs 出現 Out of memory）再改成 "512mb"
+
+# 靜態檔由 Fly proxy 直接提供，不經過 Django（後台的 CSS / JS）
+[[statics]]
+  guest_path = "/app/staticfiles"
+  url_prefix = "/static/"

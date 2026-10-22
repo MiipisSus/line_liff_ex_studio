@@ -20,7 +20,7 @@ LINE 預約系統（LIFF / LINE MINI App + Messaging API + Django 後台）。
 | 後台 | Django Admin（可考慮 Unfold 主題） | 確定 |
 | LIFF 前端 | Django template + HTMX + Bootstrap 5（CDN） | 確定 |
 | 排程 / 背景任務 | django-q2（Django ORM broker，用 PostgreSQL） | 確定 |
-| 部署 | 既有 VPS、Nginx、Let's Encrypt、Docker Compose | 確定 |
+| 部署 | Fly.io（作品集階段，scale-to-zero）＋外部免費 PostgreSQL（Neon）；VPS 由使用者自行處理 | 確定 |
 | 本機 HTTPS 通道 | ngrok 或 cloudflared | 確定 |
 
 技術選擇變更時，請同步更新這張表。
@@ -136,7 +136,7 @@ Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 40
 4. ✅ **Bot 通知**：預約成功時用 reply 通知；店家改變狀態時用 push 通知。Rich Menu 提供「我要預約」和「我的預約」。
    - 店家在已有預約的日期新增休假或修改班表時，後台要列出受影響的預約並提示。
    - 實作：狀態機在 `booking/services.py`（`ALLOWED_TRANSITIONS`，轉換時 `select_for_update` 以資料庫狀態為準）；顧客取消檢查取消期限並記錄 `cancelled_by`。webhook 在 `line_bot/`。後台預約列表以 admin action 操作狀態，店家取消有確認頁；班表 / 例外日存檔後以 `find_bookings_outside_schedule()` 提示受影響預約。
-5. **排程**：前一天提醒；逾時未確認的預約自動取消。（已實作並通過測試，待實測）
+5. ✅ **排程**：前一天提醒；逾時未確認的預約自動取消。
    - 規則（店家可設定）：已確認的預約在開始前 24 小時提醒；開始前 3 小時仍未確認就自動取消（`cancelled_by=system`）並通知。設為 0 代表關閉。
    - 實作：`booking/services.py` 的 `send_due_reminders()`、`cancel_unconfirmed_bookings()`；`booking/tasks.py` 只是 django-q2 的薄包裝，每 10 分鐘執行。提醒以 `select_for_update(skip_locked=True)` + `reminded_at` 認領，commit 後才排入推播，多個工作同時跑也不會重複（有併發測試）。
    - 為了不讓顧客剛預約就被自動取消：顧客最早可預約時間 = max(`min_advance_minutes`, 自動取消時數 + 1 小時)（`customer_min_advance_minutes()`）。店家插單直接為 `confirmed`，且不受此限制。
@@ -154,6 +154,11 @@ Messaging API webhook 必須驗證 `X-Line-Signature`，驗證失敗一律回 40
 - 新增套件時，固定版本寫進 `requirements.txt`（執行期）或 `requirements-dev.txt`（測試 / 開發）。
 
 ## 部署注意事項
+
+- **Fly.io**：設定在 `fly.toml`、`Dockerfile`，步驟見 `docs/deploy-fly.md`，一律用 `scripts/fly-deploy.sh` 部署（同時更新排程機器的 image）。
+  - 成本限制：web 1 台 `shared-cpu-1x` / 256MB、`auto_stop_machines = "suspend"`、`min_machines_running = 0`；不開 Fly Managed Postgres；不配 dedicated IPv4。
+  - 資料庫用外部 PostgreSQL（`DATABASE_URL`），**不能改用 SQLite**（exclusion constraint、`skip_locked` 都需要 PostgreSQL）。
+  - 沒有常駐 qcluster：`TASKS_SYNC=True` 時推播不經過 django-q2，當下直接發送；失敗不丟給呼叫端，記錄到 `line_bot.FailedNotification`（後台可查看）。**不要改用 django-q2 的 `sync` 模式**：它會把例外直接丟回呼叫端（後台操作變 500），也不寫 Failure。排程由 Fly scheduled machine 每小時跑 `python manage.py run_scheduled_jobs`（自動取消、提醒、重試 24 小時內的 FailedNotification）。`setup_schedules` 只用於有常駐 qcluster 的環境。
 
 - 正式環境：`DJANGO_DEBUG=False`，`DJANGO_ALLOWED_HOSTS` 填實際網域（不可用 `*`），`DJANGO_SECRET_KEY` 另外產生。
 - 需要額外一個常駐程序跑 `python manage.py qcluster`（Docker Compose 另開一個 service，與 web 共用 image 和 `.env`）；部署後執行一次 `python manage.py setup_schedules`。
